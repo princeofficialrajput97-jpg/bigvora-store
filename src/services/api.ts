@@ -1,5 +1,5 @@
-import { Product, Order, ProjectRequest, Conversation, StoreNotification } from '../types';
-import { INITIAL_PRODUCTS, INITIAL_REQUESTS, INITIAL_CONVERSATIONS, INITIAL_NOTIFICATIONS } from '../data/initialData';
+import { Product, Order, OrderItem, ProjectRequest, Conversation, StoreNotification, SupportTicket, TicketStatus } from '../types';
+import { INITIAL_PRODUCTS, INITIAL_REQUESTS, INITIAL_CONVERSATIONS, INITIAL_NOTIFICATIONS, INITIAL_TICKETS } from '../data/initialData';
 
 // Storage keys for client persistence
 const STORAGE_PREFIX = 'bigvora_';
@@ -8,6 +8,14 @@ const STORE_ORDERS = `${STORAGE_PREFIX}orders`;
 const STORE_REQUESTS = `${STORAGE_PREFIX}requests`;
 const STORE_CONVERSATIONS = `${STORAGE_PREFIX}conversations`;
 const STORE_NOTIFICATIONS = `${STORAGE_PREFIX}notifications`;
+const STORE_TICKETS = `${STORAGE_PREFIX}tickets`;
+
+// Live Cloud Backend on Railway (Auto-detected for Web & Native Capacitor APK)
+export const LIVE_BACKEND_URL = 'https://backend-production-1bb18.up.railway.app';
+
+export const API_BASE = (typeof window !== 'undefined' && window.location.origin.includes('up.railway.app'))
+  ? ''
+  : LIVE_BACKEND_URL;
 
 function getLocalData<T>(key: string, defaultVal: T): T {
   try {
@@ -27,6 +35,20 @@ function setLocalData<T>(key: string, val: T): void {
 }
 
 export const api = {
+  // 0. Health & Connectivity Check
+  async checkHealth(): Promise<{ status: string; online: boolean; database?: string }> {
+    try {
+      const res = await fetch(`${API_BASE}/api/health`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        return { status: data.status || 'ok', online: true, database: data.database };
+      }
+    } catch (e) {
+      // offline
+    }
+    return { status: 'offline', online: false };
+  },
+
   // 1. Fetch Products
   async getProducts(params?: { type?: string; platform?: string; status?: string; search?: string; sort?: string }): Promise<Product[]> {
     try {
@@ -37,7 +59,7 @@ export const api = {
       if (params?.search) query.append('search', params.search);
       if (params?.sort) query.append('sort', params.sort);
 
-      const res = await fetch(`/api/products?${query.toString()}`);
+      const res = await fetch(`${API_BASE}/api/products?${query.toString()}`);
       if (res.ok) {
         const data = await res.json();
         if (data.products && Array.isArray(data.products)) {
@@ -46,7 +68,7 @@ export const api = {
         }
       }
     } catch (e) {
-      console.warn('[API] Server fetch failed, using synchronized local store');
+      console.warn('[API] Server fetch failed, using local store cache');
     }
     return getLocalData<Product[]>(STORE_PRODUCTS, INITIAL_PRODUCTS);
   },
@@ -54,111 +76,87 @@ export const api = {
   // 2. Fetch Single Product
   async getProduct(id: string): Promise<Product | null> {
     try {
-      const res = await fetch(`/api/products/${id}`);
+      const res = await fetch(`${API_BASE}/api/products/${id}`);
       if (res.ok) {
         const data = await res.json();
         return data.product;
       }
     } catch (e) {
-      console.warn('[API] Product fetch fallback');
+      console.warn('[API] Single product fetch fallback');
     }
-    const all = getLocalData<Product[]>(STORE_PRODUCTS, INITIAL_PRODUCTS);
-    return all.find(p => p.id === id) || null;
+    const products = getLocalData<Product[]>(STORE_PRODUCTS, INITIAL_PRODUCTS);
+    return products.find(p => p.id === id) || null;
   },
 
-  // 3. Reserve Stock (Transactional Concurrency Lock)
+  // 3. Reserve Stock (Locks item atomically on cloud backend)
   async reserveStock(productId: string, quantity = 1): Promise<{ success: boolean; reservationId?: string; error?: string }> {
     try {
-      const res = await fetch('/api/inventory/reserve', {
+      const res = await fetch(`${API_BASE}/api/inventory/reserve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ productId, quantity }),
       });
       const data = await res.json();
-      if (res.ok && data.success) {
-        return { success: true, reservationId: data.reservationId };
-      }
-      return { success: false, error: data.error || 'Failed to reserve stock.' };
+      return data;
     } catch (e) {
-      // Local fallback lock check
-      const all = getLocalData<Product[]>(STORE_PRODUCTS, INITIAL_PRODUCTS);
-      const product = all.find(p => p.id === productId);
-      if (!product || product.status === 'SOLD_OUT' || product.availableStock < quantity) {
-        return { success: false, error: 'Product is SOLD OUT or unavailable.' };
+      // Offline local lock
+      const products = getLocalData<Product[]>(STORE_PRODUCTS, INITIAL_PRODUCTS);
+      const product = products.find(p => p.id === productId);
+      if (product) {
+        if (product.availableStock >= quantity) {
+          product.availableStock -= quantity;
+          product.reservedStock += quantity;
+          setLocalData(STORE_PRODUCTS, products);
+          return { success: true, reservationId: `RES-LOC-${Date.now()}` };
+        }
+        return { success: false, error: 'Product out of stock' };
       }
-      product.availableStock -= quantity;
-      product.reservedStock += quantity;
-      if (product.availableStock === 0) product.status = 'RESERVED';
-      setLocalData(STORE_PRODUCTS, all);
-      return { success: true, reservationId: `RES-LOCAL-${Date.now()}` };
+      return { success: false, error: 'Product not found' };
     }
   },
 
-  // 4. Release Reserved Stock
-  async releaseStock(reservationId: string): Promise<void> {
+  // 4. Release Stock Reservation
+  async releaseStock(reservationId: string): Promise<boolean> {
     try {
-      await fetch('/api/inventory/release', {
+      await fetch(`${API_BASE}/api/inventory/release`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reservationId }),
       });
+      return true;
     } catch (e) {
-      console.warn('[API] Release reservation error');
+      return false;
     }
   },
 
-  // 5. Submit Order (with Idempotency Key & Verification)
-  async createOrder(orderPayload: {
+  // 5. Place Verified Order
+  async placeOrder(orderPayload: {
     idempotencyKey: string;
-    items: any[];
-    paymentMethod: string;
-    paymentTransactionId: string;
+    items: Array<{ productId: string; title: string; price: number; quantity: number; fileSize?: string; isSourceCode?: boolean; isApk?: boolean }>;
+    paymentMethod: 'UPI' | 'CARD' | 'CRYPTO' | 'CASH';
+    paymentTransactionId?: string;
     customerName: string;
     customerPhone: string;
     customerEmail: string;
     reservationIds?: string[];
   }): Promise<{ success: boolean; order?: Order; error?: string }> {
     try {
-      const res = await fetch('/api/orders', {
+      const res = await fetch(`${API_BASE}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(orderPayload),
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        // Also save to local storage
         const currentOrders = getLocalData<Order[]>(STORE_ORDERS, []);
         currentOrders.unshift(data.order);
         setLocalData(STORE_ORDERS, currentOrders);
         return { success: true, order: data.order };
       }
-      return { success: false, error: data.error || 'Failed to place order.' };
+      return { success: false, error: data.error || 'Failed to place order on server.' };
     } catch (e) {
-      // Offline / client fallback
+      // Fallback local storage
       const currentOrders = getLocalData<Order[]>(STORE_ORDERS, []);
-      const allProducts = getLocalData<Product[]>(STORE_PRODUCTS, INITIAL_PRODUCTS);
-
-      // Verify stock
-      for (const item of orderPayload.items) {
-        const p = allProducts.find(pr => pr.id === item.productId);
-        if (p && p.status === 'SOLD_OUT') {
-          return { success: false, error: `Item ${p.title} is SOLD OUT.` };
-        }
-      }
-
-      // Mark inventory
-      for (const item of orderPayload.items) {
-        const p = allProducts.find(pr => pr.id === item.productId);
-        if (p) {
-          p.availableStock = Math.max(0, p.availableStock - (item.quantity || 1));
-          p.soldCount += item.quantity || 1;
-          if (p.licenseModel === 'SINGLE_LICENSE' || p.availableStock === 0) {
-            p.status = 'SOLD_OUT';
-          }
-        }
-      }
-      setLocalData(STORE_PRODUCTS, allProducts);
-
       const subtotal = orderPayload.items.reduce((sum, it) => sum + it.price * (it.quantity || 1), 0);
       const tax = Math.round(subtotal * 0.08 * 100) / 100;
       const orderId = `ord-${Date.now()}`;
@@ -168,24 +166,31 @@ export const api = {
         id: orderId,
         orderNumber: `BV-${Math.floor(100000 + Math.random() * 900000)}`,
         createdAt: new Date().toISOString(),
-        items: orderPayload.items.map(it => ({
-          ...it,
+        items: orderPayload.items.map((it: any) => ({
+          productId: it.productId,
+          productTitle: it.title || it.productTitle || 'Digital App License',
+          productType: (it.productType || 'MOBILE_APP') as any,
+          thumbnail: it.thumbnail || 'https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=800&auto=format&fit=crop&q=80',
+          logo: it.logo || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200&auto=format&fit=crop&q=80',
+          price: it.price,
+          licenseModel: (it.licenseModel || 'COMMERCIAL_USE') as any,
+          deliveryContents: (it.deliveryContents || ['FULL_SOURCE_CODE', 'COMPILED_APK', 'DOCUMENTATION_PDF', 'COMMERCIAL_LICENSE_CERT']) as any,
           downloadToken: token,
-          downloadUrl: `/api/downloads/${token}`,
+          downloadUrl: `${API_BASE}/api/downloads/${token}`,
           downloadExpiresAt: new Date(Date.now() + 48 * 3600000).toISOString(),
           fileSize: it.fileSize || '38.4 MB',
           format: 'ZIP (Source Code + Documentation)',
           installationGuide: 'Unzip archive and open with Android Studio or IDE. Read README.md.',
-        })),
+        })) as OrderItem[],
         subtotal,
         tax,
         discount: 0,
         total: subtotal + tax,
         currency: 'USD',
         paymentMethod: orderPayload.paymentMethod,
-        paymentStatus: 'PAID',
-        paymentTransactionId: orderPayload.paymentTransactionId,
-        orderStatus: 'DELIVERED',
+        paymentStatus: orderPayload.paymentMethod === 'CASH' ? 'PENDING' : 'PAID',
+        paymentTransactionId: orderPayload.paymentTransactionId || `TXN-${Date.now()}`,
+        orderStatus: orderPayload.paymentMethod === 'CASH' ? 'CONFIRMED' : 'DELIVERED',
         customerName: orderPayload.customerName,
         customerPhone: orderPayload.customerPhone,
         customerEmail: orderPayload.customerEmail,
@@ -197,10 +202,15 @@ export const api = {
     }
   },
 
+  // Alias for createOrder
+  async createOrder(payload: any): Promise<{ success: boolean; order?: Order; error?: string }> {
+    return this.placeOrder(payload);
+  },
+
   // 6. Get Orders
   async getOrders(): Promise<Order[]> {
     try {
-      const res = await fetch('/api/orders');
+      const res = await fetch(`${API_BASE}/api/orders`);
       if (res.ok) {
         const data = await res.json();
         if (data.orders) {
@@ -209,15 +219,15 @@ export const api = {
         }
       }
     } catch (e) {
-      console.warn('[API] Get orders fallback');
+      console.warn('[API] Get orders fallback to local cache');
     }
     return getLocalData<Order[]>(STORE_ORDERS, []);
   },
 
-  // 6b. Approve Cash Payment (Transitions from 24-hr review to PAID & Unlocks Downloads)
+  // 6b. Approve Cash Payment
   async approveCashOrder(orderId: string): Promise<{ success: boolean; order?: Order; error?: string }> {
     try {
-      const res = await fetch(`/api/orders/${orderId}/approve-cash`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/orders/${orderId}/approve-cash`, { method: 'POST' });
       const data = await res.json();
       if (res.ok && data.success) {
         const currentOrders = getLocalData<Order[]>(STORE_ORDERS, []);
@@ -241,7 +251,7 @@ export const api = {
       ord.items = ord.items.map(it => ({
         ...it,
         downloadToken: `DL-LOCAL-${Date.now()}`,
-        downloadUrl: `/api/downloads/DL-LOCAL-${Date.now()}`,
+        downloadUrl: `${API_BASE}/api/downloads/DL-LOCAL-${Date.now()}`,
         downloadExpiresAt: new Date(Date.now() + 48 * 3600000).toISOString(),
       }));
       setLocalData(STORE_ORDERS, currentOrders);
@@ -253,7 +263,7 @@ export const api = {
   // 7. Send Phone OTP
   async sendOtp(phone: string): Promise<{ success: boolean; devOtp?: string; error?: string }> {
     try {
-      const res = await fetch('/api/auth/send-otp', {
+      const res = await fetch(`${API_BASE}/api/auth/send-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone }),
@@ -268,7 +278,7 @@ export const api = {
   // 8. Verify Phone OTP
   async verifyOtp(phone: string, otp: string, name?: string): Promise<{ success: boolean; user?: any; token?: string; error?: string }> {
     try {
-      const res = await fetch('/api/auth/verify-otp', {
+      const res = await fetch(`${API_BASE}/api/auth/verify-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone, otp, name }),
@@ -288,9 +298,7 @@ export const api = {
             name: isAdmin ? (name || 'BigVora Founder & Admin') : (name || 'BigVora User'),
             phone,
             email: isAdmin ? 'admin@bigvora.com' : `${cleanDigits}@customer.bigvora.com`,
-            avatarUrl: isAdmin 
-              ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'
-              : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+            avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
             isPhoneVerified: true,
             role: isAdmin ? 'ADMIN' : 'USER',
             createdAt: new Date().toISOString(),
@@ -304,7 +312,7 @@ export const api = {
   // 9. Submit Custom Project Request
   async submitProjectRequest(payload: any): Promise<{ success: boolean; requestId?: string; request?: ProjectRequest; error?: string }> {
     try {
-      const res = await fetch('/api/requests', {
+      const res = await fetch(`${API_BASE}/api/requests`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -352,7 +360,7 @@ export const api = {
   // 10. Get Requests
   async getProjectRequests(): Promise<ProjectRequest[]> {
     try {
-      const res = await fetch('/api/requests');
+      const res = await fetch(`${API_BASE}/api/requests`);
       if (res.ok) {
         const data = await res.json();
         if (data.requests) {
@@ -369,7 +377,7 @@ export const api = {
   // 11. Approve Quote
   async approveProjectQuote(id: string): Promise<boolean> {
     try {
-      const res = await fetch(`/api/requests/${id}/approve`, { method: 'PATCH' });
+      const res = await fetch(`${API_BASE}/api/requests/${id}/approve`, { method: 'PATCH' });
       if (res.ok) return true;
     } catch (e) {
       console.warn('[API] Approve fallback');
@@ -388,7 +396,7 @@ export const api = {
   // 12. Get Conversations
   async getConversations(): Promise<Conversation[]> {
     try {
-      const res = await fetch('/api/conversations');
+      const res = await fetch(`${API_BASE}/api/conversations`);
       if (res.ok) {
         const data = await res.json();
         if (data.conversations) {
@@ -405,7 +413,7 @@ export const api = {
   // 13. Send Message
   async sendMessage(conversationId: string, text: string, attachmentName?: string): Promise<boolean> {
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/messages`, {
+      const res = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, attachmentName }),
@@ -417,7 +425,146 @@ export const api = {
     return false;
   },
 
-  // 14. Notifications
+  // 14. Support Tickets
+  async getTickets(): Promise<SupportTicket[]> {
+    try {
+      const res = await fetch(`${API_BASE}/api/tickets`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.tickets) {
+          setLocalData(STORE_TICKETS, data.tickets);
+          return data.tickets;
+        }
+      }
+    } catch (e) {
+      console.warn('[API] Tickets fetch fallback');
+    }
+    return getLocalData<SupportTicket[]>(STORE_TICKETS, INITIAL_TICKETS);
+  },
+
+  async createTicket(payload: any): Promise<SupportTicket | null> {
+    try {
+      const res = await fetch(`${API_BASE}/api/tickets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.ticket;
+      }
+    } catch (e) {
+      console.warn('[API] Ticket creation fallback');
+    }
+    return null;
+  },
+
+  async replyTicket(ticketId: string, text: string, senderRole?: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/tickets/${ticketId}/reply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, senderRole }),
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  async updateTicketStatus(ticketId: string, status: TicketStatus): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/tickets/${ticketId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // 15. Admin Cloud Operations (Persists directly to Cloud PostgreSQL)
+  async adminUpdateOrder(orderId: string, status: string, paymentStatus?: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/orders/${orderId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, paymentStatus }),
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  async adminAddProduct(product: Partial<Product>): Promise<Product | null> {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/products`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(product),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.product;
+      }
+    } catch (e) {
+      console.warn('[API] Admin add product fallback');
+    }
+    return null;
+  },
+
+  async adminUpdateProduct(id: string, updates: Partial<Product>): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/products/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  async adminDeleteProduct(id: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/products/${id}`, {
+        method: 'DELETE',
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  async adminUpdateProjectRequest(id: string, updates: Partial<ProjectRequest>): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/requests/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  async adminDeleteProjectRequest(id: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/requests/${id}`, {
+        method: 'DELETE',
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // 16. Notifications
   getNotifications(): StoreNotification[] {
     return getLocalData<StoreNotification[]>(STORE_NOTIFICATIONS, INITIAL_NOTIFICATIONS);
   },

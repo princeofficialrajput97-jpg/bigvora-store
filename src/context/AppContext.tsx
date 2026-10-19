@@ -267,11 +267,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setConversations(convs);
   };
 
+  const refreshTickets = async () => {
+    const tkts = await api.getTickets();
+    if (tkts && Array.isArray(tkts)) {
+      setTickets(tkts);
+    }
+  };
+
   useEffect(() => {
     refreshProducts();
     refreshOrders();
     refreshRequests();
     refreshConversations();
+    refreshTickets();
   }, []);
 
   // Save cart & wishlist changes
@@ -593,6 +601,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     setTickets(prev => [newTicket, ...prev]);
     setActiveTicketId(newTicket.id);
+    api.createTicket(newTicket);
     showToast(`Support Ticket #${ticketNum} created!`, 'success');
     return newTicket;
   };
@@ -617,6 +626,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return t;
     }));
+
+    api.replyTicket(ticketId, text, 'CUSTOMER');
 
     setTimeout(() => {
       const agentReply: TicketMessage = {
@@ -664,6 +675,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return t;
     }));
+    api.updateTicketStatus(ticketId, 'RESOLVED');
     showToast('Ticket marked as resolved', 'info');
   };
 
@@ -688,6 +700,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return t;
     }));
+    api.updateTicketStatus(ticketId, 'IN_PROGRESS');
     showToast('Ticket re-opened', 'info');
   };
 
@@ -744,6 +757,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return o;
     }));
+    await api.adminUpdateOrder(orderId, status, paymentStatus);
     showToast(`Order status updated to ${status}`, 'success');
     return true;
   };
@@ -759,29 +773,36 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return r;
     }));
+    await api.adminUpdateProjectRequest(requestId, updates);
     showToast(`Brief ${requestId} updated successfully!`, 'success');
     return true;
   };
 
   const deleteProjectRequest = async (requestId: string): Promise<boolean> => {
     setRequests(prev => prev.filter(r => r.id !== requestId && r.requestId !== requestId));
+    await api.adminDeleteProjectRequest(requestId);
     showToast(`Brief removed from records`, 'info');
     return true;
   };
 
   const addProduct = async (newProd: any): Promise<boolean> => {
-    const id = `prod-${Date.now()}`;
-    const product: Product = {
-      ...newProd,
-      id,
-      soldCount: 0,
-      rating: 5.0,
-      reviewCount: 1,
-      currency: 'USD',
-      updatedAt: new Date().toISOString(),
-    };
-    setProducts(prev => [product, ...prev]);
-    showToast(`Product "${product.title}" added to store!`, 'success');
+    const created = await api.adminAddProduct(newProd);
+    if (created) {
+      setProducts(prev => [created, ...prev]);
+    } else {
+      const id = `prod-${Date.now()}`;
+      const product: Product = {
+        ...newProd,
+        id,
+        soldCount: 0,
+        rating: 5.0,
+        reviewCount: 1,
+        currency: 'USD',
+        updatedAt: new Date().toISOString(),
+      };
+      setProducts(prev => [product, ...prev]);
+    }
+    showToast(`Product "${newProd.title}" added to store & database!`, 'success');
     return true;
   };
 
@@ -792,12 +813,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return p;
     }));
+    await api.adminUpdateProduct(productId, updates);
     showToast(`Product updated successfully`, 'success');
     return true;
   };
 
   const deleteProduct = async (productId: string): Promise<boolean> => {
     setProducts(prev => prev.filter(p => p.id !== productId));
+    await api.adminDeleteProduct(productId);
     showToast(`Product deleted from marketplace`, 'info');
     return true;
   };
@@ -822,7 +845,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return t;
     }));
-    showToast(`Admin reply submitted to ticket!`, 'success');
+    await api.replyTicket(ticketId, text.trim(), 'SUPER_ADMIN');
+    showToast(`Admin reply submitted to ticket & synced!`, 'success');
     return true;
   };
 
@@ -837,6 +861,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return t;
     }));
+    await api.updateTicketStatus(ticketId, status);
     showToast(`Ticket status updated to ${status}`, 'success');
     return true;
   };

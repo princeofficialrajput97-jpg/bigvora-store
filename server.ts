@@ -2,8 +2,11 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { INITIAL_PRODUCTS, INITIAL_REQUESTS, INITIAL_CONVERSATIONS } from './src/data/initialData.ts';
-import { Product, Order, ProjectRequest, Conversation } from './src/types/index.ts';
+import pg from 'pg';
+import { INITIAL_PRODUCTS, INITIAL_REQUESTS, INITIAL_CONVERSATIONS, INITIAL_TICKETS } from './src/data/initialData.ts';
+import { Product, Order, ProjectRequest, Conversation, SupportTicket } from './src/types/index.ts';
+
+const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,13 +14,109 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
+// Enable CORS for mobile app (Capacitor WebView) and remote clients
+app.use((req: Request, res: Response, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json());
 
-// In-Memory Database (Server-authoritative state)
+// PostgreSQL Cloud Database Pool
+let pool: any = null;
+if (process.env.DATABASE_URL) {
+  try {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+    });
+    console.log('[BigVora Database] PostgreSQL Pool configured with live DATABASE_URL.');
+  } catch (err) {
+    console.warn('[BigVora Database] Failed to initialize PostgreSQL pool:', err);
+  }
+}
+
+// In-Memory & Cloud Synchronized State
 let products: Product[] = JSON.parse(JSON.stringify(INITIAL_PRODUCTS));
 const orders: Order[] = [];
 let projectRequests: ProjectRequest[] = JSON.parse(JSON.stringify(INITIAL_REQUESTS));
 let conversations: Conversation[] = JSON.parse(JSON.stringify(INITIAL_CONVERSATIONS));
+let tickets: SupportTicket[] = JSON.parse(JSON.stringify(INITIAL_TICKETS));
+
+// Cloud Database Initializer & Persistence Helpers
+async function initDb() {
+  if (!pool) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS store_data (
+        key VARCHAR(64) PRIMARY KEY,
+        data JSONB NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Load or seed Products
+    const prodRes = await pool.query('SELECT data FROM store_data WHERE key = $1', ['products']);
+    if (prodRes.rows.length > 0 && Array.isArray(prodRes.rows[0].data)) {
+      products = prodRes.rows[0].data;
+      console.log(`[BigVora Database] Loaded ${products.length} products from PostgreSQL.`);
+    } else {
+      await pool.query('INSERT INTO store_data (key, data) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', ['products', JSON.stringify(products)]);
+    }
+
+    // Load Orders
+    const ordRes = await pool.query('SELECT data FROM store_data WHERE key = $1', ['orders']);
+    if (ordRes.rows.length > 0 && Array.isArray(ordRes.rows[0].data)) {
+      orders.length = 0;
+      orders.push(...ordRes.rows[0].data);
+      console.log(`[BigVora Database] Loaded ${orders.length} orders from PostgreSQL.`);
+    }
+
+    // Load Requests
+    const reqRes = await pool.query('SELECT data FROM store_data WHERE key = $1', ['requests']);
+    if (reqRes.rows.length > 0 && Array.isArray(reqRes.rows[0].data)) {
+      projectRequests = reqRes.rows[0].data;
+      console.log(`[BigVora Database] Loaded ${projectRequests.length} project requests from PostgreSQL.`);
+    }
+
+    // Load Conversations
+    const convRes = await pool.query('SELECT data FROM store_data WHERE key = $1', ['conversations']);
+    if (convRes.rows.length > 0 && Array.isArray(convRes.rows[0].data)) {
+      conversations = convRes.rows[0].data;
+      console.log(`[BigVora Database] Loaded ${conversations.length} conversations from PostgreSQL.`);
+    }
+
+    // Load Support Tickets
+    const tktRes = await pool.query('SELECT data FROM store_data WHERE key = $1', ['tickets']);
+    if (tktRes.rows.length > 0 && Array.isArray(tktRes.rows[0].data)) {
+      tickets = tktRes.rows[0].data;
+      console.log(`[BigVora Database] Loaded ${tickets.length} support tickets from PostgreSQL.`);
+    } else {
+      await pool.query('INSERT INTO store_data (key, data) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', ['tickets', JSON.stringify(tickets)]);
+    }
+  } catch (err) {
+    console.warn('[BigVora Database] PostgreSQL initialization warning:', err);
+  }
+}
+
+async function persistData(key: string, data: any) {
+  if (!pool) return;
+  try {
+    await pool.query(`
+      INSERT INTO store_data (key, data, updated_at)
+      VALUES ($1, $2, CURRENT_TIMESTAMP)
+      ON CONFLICT (key) DO UPDATE
+      SET data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP
+    `, [key, JSON.stringify(data)]);
+  } catch (err) {
+    console.error(`[BigVora Database] Failed to persist key "${key}":`, err);
+  }
+}
 
 // Stock Reservations Map: reservationId -> { productId, quantity, expiresAt, status: 'PENDING' | 'CONSUMED' | 'EXPIRED' }
 interface StockReservation {
@@ -339,6 +438,8 @@ app.post('/api/orders', (req: Request, res: Response) => {
 
   orders.unshift(order);
   idempotencyKeys.set(idempotencyKey, order);
+  persistData('orders', orders);
+  persistData('products', products);
 
   // If Cash / Manual Payment, initiate linked conversation for screenshot & verification exchange
   if (isCashManual) {
@@ -424,6 +525,8 @@ app.post('/api/orders/:id/approve-cash', (req: Request, res: Response) => {
     conv.lastMessageTimestamp = 'Just now';
     conv.unreadCount += 1;
   }
+  persistData('orders', orders);
+  persistData('conversations', conversations);
 
   res.json({
     success: true,
@@ -616,6 +719,8 @@ app.post('/api/requests', (req: Request, res: Response) => {
     ]
   };
   conversations.unshift(newConversation);
+  persistData('requests', projectRequests);
+  persistData('conversations', conversations);
 
   res.json({
     success: true,
@@ -640,6 +745,7 @@ app.patch('/api/requests/:id/approve', (req: Request, res: Response) => {
   request.scopeApprovedByCustomer = true;
   request.status = 'AWAITING_PAYMENT';
   request.updatedAt = new Date().toISOString().split('T')[0];
+  persistData('requests', projectRequests);
 
   res.json({ success: true, request });
 });
@@ -748,8 +854,156 @@ app.get('/api/docs', (req: Request, res: Response) => {
   });
 });
 
+// 17. GET /api/health
+app.get('/api/health', (req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    timestamp: Date.now(),
+    database: pool ? 'postgresql' : 'in-memory',
+    totalProducts: products.length,
+    totalOrders: orders.length,
+    totalRequests: projectRequests.length,
+    totalTickets: tickets.length,
+  });
+});
+
+// 18. Support Tickets Endpoints
+app.get('/api/tickets', (req: Request, res: Response) => {
+  res.json({ success: true, count: tickets.length, tickets });
+});
+
+app.post('/api/tickets', (req: Request, res: Response) => {
+  const { subject, category, priority, initialMessage, attachmentName } = req.body;
+  const ticketNumber = `TKT-${Math.floor(10000 + Math.random() * 90000)}`;
+  const newTicket: SupportTicket = {
+    id: `tkt-${Date.now()}`,
+    ticketNumber,
+    subject: subject || 'Support Request',
+    category: (category as any) || 'GENERAL',
+    priority: priority || 'MEDIUM',
+    status: 'OPEN',
+    assignedAgent: 'Vikram Joshi (Senior Support Lead)',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    unreadCustomerCount: 0,
+    messages: [
+      {
+        id: `tm-${Date.now()}`,
+        sender: 'CUSTOMER',
+        senderName: 'Customer',
+        text: initialMessage || 'Ticket opened.',
+        attachmentName,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+    ],
+  };
+  tickets.unshift(newTicket);
+  persistData('tickets', tickets);
+  res.json({ success: true, ticket: newTicket });
+});
+
+app.post('/api/tickets/:id/reply', (req: Request, res: Response) => {
+  const { text, senderRole, senderName } = req.body;
+  const tkt = tickets.find(t => t.id === req.params.id || t.ticketNumber === req.params.id);
+  if (!tkt) return res.status(404).json({ success: false, error: 'Ticket not found' });
+
+  const replyMsg = {
+    id: `tm-${Date.now()}`,
+    sender: (senderRole === 'SUPER_ADMIN' ? 'SUPPORT_AGENT' : 'CUSTOMER') as any,
+    senderName: senderName || (senderRole === 'SUPER_ADMIN' ? 'BigVora Founder & Admin' : 'Customer'),
+    senderRole: senderRole || 'Customer',
+    text: (text || '').trim(),
+    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  };
+  tkt.messages.push(replyMsg);
+  tkt.updatedAt = new Date().toISOString();
+  persistData('tickets', tickets);
+  res.json({ success: true, message: replyMsg });
+});
+
+app.patch('/api/tickets/:id', (req: Request, res: Response) => {
+  const { status, assignedAgent } = req.body;
+  const tkt = tickets.find(t => t.id === req.params.id || t.ticketNumber === req.params.id);
+  if (!tkt) return res.status(404).json({ success: false, error: 'Ticket not found' });
+
+  if (status) tkt.status = status;
+  if (assignedAgent) tkt.assignedAgent = assignedAgent;
+  tkt.updatedAt = new Date().toISOString();
+  persistData('tickets', tickets);
+  res.json({ success: true, ticket: tkt });
+});
+
+// 19. Admin Orders & Products Endpoints (PostgreSQL Synced)
+app.patch('/api/admin/orders/:id', (req: Request, res: Response) => {
+  const { status, paymentStatus } = req.body;
+  const ord = orders.find(o => o.id === req.params.id || o.orderNumber === req.params.id);
+  if (!ord) return res.status(404).json({ success: false, error: 'Order not found' });
+
+  if (status) ord.orderStatus = status;
+  if (paymentStatus) {
+    ord.paymentStatus = paymentStatus;
+    if (paymentStatus === 'PAID') {
+      ord.verificationStatus = 'VERIFIED';
+    }
+  }
+  persistData('orders', orders);
+  res.json({ success: true, order: ord });
+});
+
+app.post('/api/admin/products', (req: Request, res: Response) => {
+  const newProduct: Product = {
+    ...req.body,
+    id: `prod-${Date.now()}`,
+    soldCount: 0,
+    rating: 5.0,
+    reviewCount: 1,
+    currency: req.body.currency || 'USD',
+    updatedAt: new Date().toISOString().split('T')[0],
+  };
+  products.unshift(newProduct);
+  persistData('products', products);
+  res.json({ success: true, product: newProduct });
+});
+
+app.put('/api/admin/products/:id', (req: Request, res: Response) => {
+  const idx = products.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ success: false, error: 'Product not found' });
+
+  products[idx] = { ...products[idx], ...req.body, updatedAt: new Date().toISOString().split('T')[0] };
+  persistData('products', products);
+  res.json({ success: true, product: products[idx] });
+});
+
+app.delete('/api/admin/products/:id', (req: Request, res: Response) => {
+  const idx = products.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ success: false, error: 'Product not found' });
+
+  const deleted = products.splice(idx, 1)[0];
+  persistData('products', products);
+  res.json({ success: true, deletedProduct: deleted });
+});
+
+app.patch('/api/admin/requests/:id', (req: Request, res: Response) => {
+  const reqItem = projectRequests.find(r => r.id === req.params.id || r.requestId === req.params.id);
+  if (!reqItem) return res.status(404).json({ success: false, error: 'Request not found' });
+
+  Object.assign(reqItem, req.body, { updatedAt: new Date().toISOString().split('T')[0] });
+  persistData('requests', projectRequests);
+  res.json({ success: true, request: reqItem });
+});
+
+app.delete('/api/admin/requests/:id', (req: Request, res: Response) => {
+  const idx = projectRequests.findIndex(r => r.id === req.params.id || r.requestId === req.params.id);
+  if (idx === -1) return res.status(404).json({ success: false, error: 'Request not found' });
+
+  const deleted = projectRequests.splice(idx, 1)[0];
+  persistData('requests', projectRequests);
+  res.json({ success: true, deletedRequest: deleted });
+});
+
 // Setup Vite middleware in dev or static serving in production
 async function start() {
+  await initDb();
   if (process.env.NODE_ENV === 'production') {
     app.use(express.static(path.resolve(__dirname, 'dist')));
     app.get('*', (req: Request, res: Response) => {

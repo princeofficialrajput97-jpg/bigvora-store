@@ -24,6 +24,7 @@ import { ApiDocsScreen } from './components/screens/ApiDocsScreen';
 import { LoginScreen } from './components/screens/LoginScreen';
 import { AdminScreen } from './components/screens/AdminScreen';
 import { MaintenanceScreen } from './components/screens/MaintenanceScreen';
+import { OfflineModal } from './components/common/OfflineModal';
 
 const MainLayout: React.FC = () => {
   const { currentScreen, toasts, maintenanceMode, isAdmin, navigateTo } = useApp();
@@ -139,6 +140,9 @@ const MainLayout: React.FC = () => {
 
       {/* Global Auth Modal */}
       <AuthModal />
+
+      {/* Global Offline / No Internet Modal */}
+      <OfflineModal />
     </div>
   );
 };
