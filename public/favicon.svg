@@ -1,0 +1,54 @@
+<svg viewBox="0 0 360 360" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="favRibbon" x1="80" y1="60" x2="280" y2="300" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stopColor="#2563EB" />
+      <stop offset="50%" stopColor="#6366F1" />
+      <stop offset="100%" stopColor="#A855F7" />
+    </linearGradient>
+    <linearGradient id="favTopLoop" x1="120" y1="50" x2="260" y2="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stopColor="#4338CA" />
+      <stop offset="60%" stopColor="#9333EA" />
+      <stop offset="100%" stopColor="#C084FC" />
+    </linearGradient>
+    <linearGradient id="favBottomLoop" x1="120" y1="160" x2="280" y2="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stopColor="#6B21A8" />
+      <stop offset="60%" stopColor="#A855F7" />
+      <stop offset="100%" stopColor="#D946EF" />
+    </linearGradient>
+    <linearGradient id="favRing" x1="30" y1="180" x2="330" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stopColor="#A855F7" />
+      <stop offset="50%" stopColor="#E879F9" />
+      <stop offset="100%" stopColor="#C084FC" />
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <rect width="360" height="360" rx="80" fill="#0A0E1C" />
+  
+  <!-- Back ring -->
+  <g transform="rotate(-27 180 175)">
+    <path d="M 35 175 A 145 35 0 0 1 325 175" stroke="url(#favRing)" stroke-width="6" opacity="0.4" />
+  </g>
+
+  <!-- Spine -->
+  <path d="M 115 55 L 155 55 L 155 285 L 115 285 Z" fill="url(#favRibbon)" />
+  
+  <!-- Top Loop -->
+  <path d="M 155 55 C 215 55, 260 75, 260 120 C 260 155, 225 172, 175 175 L 155 175 L 155 125 C 175 125, 215 125, 215 115 C 215 95, 185 88, 155 88 Z" fill="url(#favTopLoop)" />
+
+  <!-- Bottom Loop -->
+  <path d="M 155 175 C 215 175, 275 190, 275 230 C 275 272, 225 285, 160 285 L 115 285 L 155 250 L 175 250 C 215 250, 230 242, 230 228 C 230 212, 205 208, 165 208 L 155 208 Z" fill="url(#favBottomLoop)" />
+
+  <!-- Fold Face -->
+  <path d="M 115 285 L 225 175 L 175 175 L 115 240 Z" fill="#312E81" opacity="0.9" />
+
+  <!-- Star -->
+  <g transform="translate(195, 115)">
+    <path d="M 0 -13 Q 0 0 -13 0 Q 0 0 0 13 Q 0 0 13 0 Q 0 0 0 -13 Z" fill="#FFFFFF" />
+  </g>
+
+  <!-- Front ring -->
+  <g transform="rotate(-27 180 175)">
+    <path d="M 325 175 A 145 35 0 0 1 35 175" stroke="url(#favRing)" stroke-width="7" />
+    <path d="M 290 188 A 145 35 0 0 1 70 188" stroke="#FFFFFF" stroke-width="2" opacity="0.8" />
+  </g>
+</svg>

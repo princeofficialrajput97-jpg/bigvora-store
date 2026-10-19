@@ -1,0 +1,6 @@
+{
+  "name": "BigVora Store",
+  "description": "Premium digital marketplace for ready-made Android apps, websites, and custom software development services.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

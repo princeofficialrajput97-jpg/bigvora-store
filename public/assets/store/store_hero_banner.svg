@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a051b"/>
+      <stop offset="50%" stop-color="#140b33"/>
+      <stop offset="100%" stop-color="#05070d"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#9333ea"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="600" fill="url(#bg)"/>
+  <circle cx="600" cy="300" r="280" fill="#7c3aed" opacity="0.12" filter="blur(80px)"/>
+  <text x="600" y="270" font-family="system-ui, sans-serif" font-size="52" font-weight="900" fill="#ffffff" text-anchor="middle">BigVora Developer Store</text>
+  <text x="600" y="340" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#c084fc" text-anchor="middle">Official Production Android &amp; Web Source Code Platform</text>
+  <rect x="450" y="390" width="300" height="50" rx="25" fill="url(#accent)"/>
+  <text x="600" y="422" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Google Play Store &amp; Vercel Ready</text>
+</svg>
