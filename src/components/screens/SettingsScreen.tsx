@@ -219,7 +219,7 @@ Custom development projects follow milestone-based payments. You may cancel any 
       {/* App Version Info */}
       <div className="text-center pt-2">
         <span className="text-[11px] text-slate-500 font-mono block">
-          BigVora Store · Android Customer Marketplace v3.4.0 (Build 3409)
+          BigVora Store · Android Customer Marketplace v1.0 (Build 1001)
         </span>
         <span className="text-[10px] text-slate-600 block mt-0.5">
           Engineered with Kotlin Architecture, Jetpack UI & Reactive State
